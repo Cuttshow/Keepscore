@@ -3,7 +3,7 @@
    Bump CACHE whenever you change app.js or index.html, otherwise phones
    that already have the old version cached will keep serving it. */
 
-const CACHE = "keepscore-v1";
+const CACHE = "keepscore-v2";
 
 const ASSETS = [
   "./",
@@ -13,8 +13,6 @@ const ASSETS = [
   "./icon-192.png",
   "./icon-512.png",
   "./apple-touch-icon.png",
-  "./vendor/react.production.min.js",
-  "./vendor/react-dom.production.min.js",
 ];
 
 self.addEventListener("install", (event) => {
