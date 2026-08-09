@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+
+<title>Keepscore</title>
+<meta name="description" content="A scorepad for card games. 2-8 players, any game, works offline." />
+
+<!-- Home screen / standalone launch -->
+<link rel="manifest" href="./manifest.webmanifest" />
+<meta name="theme-color" content="#0E2028" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Keepscore" />
+<link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+<link rel="icon" href="./icon-192.png" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0E2028;
+    overscroll-behavior: none;          /* no rubber-band bounce in standalone */
+  }
+  body {
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* Kills the 300ms double-tap-to-zoom on the keypad without disabling
+     pinch zoom, which people may still need. */
+  button, td, th {
+    touch-action: manipulation;
+  }
+  #root { min-height: 100vh; min-height: 100dvh; }
+
+  /* Shown only if the scripts fail to load at all. */
+  .boot {
+    color: #9FB0B6;
+    font: 15px/1.6 system-ui, sans-serif;
+    max-width: 320px;
+    margin: 22vh auto 0;
+    padding: 0 24px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+
+<div id="root">
+  <p class="boot">Keepscore didn't load. Reload the page, or check your connection if this is the first visit.</p>
+</div>
+
+<script src="./vendor/react.production.min.js"></script>
+<script src="./vendor/react-dom.production.min.js"></script>
+<script src="./app.js"></script>
+
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("./sw.js").catch(function () {
+        /* No service worker means no offline mode. Everything else still works. */
+      });
+    });
+  }
+</script>
+
+</body>
+</html>
