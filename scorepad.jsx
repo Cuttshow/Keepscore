@@ -65,6 +65,7 @@ function newGameFrom(draft) {
     target: Number(draft.target) || 100,
     maxRounds: Number(draft.maxRounds) || 10,
     lowWins: draft.lowWins,
+    bidding: !!draft.bidding,
     dismissedAt: -1,
   };
 }
@@ -86,6 +87,16 @@ function rankedFor(game, totals) {
     .sort((a, b) =>
       a.total === b.total ? a.seat - b.seat : game.lowWins ? a.total - b.total : b.total - a.total
     );
+}
+
+/* The open round holds two passes: bids first, then scores. Older saves
+   stored a flat map of scores, so normalize those forward. */
+const emptyPending = () => ({ bids: {}, scores: {} });
+
+function normalizePending(p) {
+  if (!p) return emptyPending();
+  if (p.bids || p.scores) return { bids: p.bids || {}, scores: p.scores || {} };
+  return { bids: {}, scores: { ...p } };
 }
 
 const toInt = (s) => {
@@ -163,6 +174,7 @@ const CSS = `
 .sp-pad thead th.sp-rdcol { color: #5C7A85; letter-spacing: .1em; }
 
 .sp-cell {
+  position: relative;
   height: 40px; font-family: var(--display); font-weight: 700; font-size: 16px;
   border-bottom: 1px solid var(--line); color: var(--paper);
   cursor: pointer; transition: background-color .16s ease;
@@ -174,6 +186,21 @@ const CSS = `
   box-shadow: inset 0 0 0 1px var(--gold-2);
 }
 .sp-cell.is-draft { color: var(--paper-2); }
+.sp-bid {
+  position: absolute; top: 2px; left: 3px;
+  font-family: var(--body); font-weight: 600; font-size: 9px;
+  letter-spacing: .02em; color: #6E8B94; pointer-events: none;
+}
+.sp-cell.is-live .sp-bid { color: rgba(23,32,43,.62); }
+
+.sp-kp-seg { display: flex; gap: 6px; background: var(--ink); padding: 4px; border-radius: 12px; margin-bottom: 12px; }
+.sp-kp-seg button {
+  flex: 1; height: 34px; border-radius: 9px; font-size: 12.5px; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--paper-2);
+  transition: background-color .18s ease, color .18s ease;
+}
+.sp-kp-seg button.is-on { background: var(--gold); color: #17202B; }
+
 .sp-rd {
   font-family: var(--body); font-size: 11px; font-weight: 600; color: #5C7A85;
   border-bottom: 1px solid var(--line);
@@ -224,10 +251,27 @@ const CSS = `
 .sp-input.is-name { letter-spacing: .02em; }
 
 .sp-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.sp-chips.is-editing { padding-top: 8px; }
+.sp-chip-wrap { position: relative; }
+.sp-chip-x {
+  position: absolute; top: -6px; right: -6px;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--rose); color: #17202B;
+  font-size: 15px; font-weight: 700; line-height: 1;
+  display: grid; place-items: center;
+  box-shadow: 0 0 0 2px var(--ink);
+}
+.sp-chips-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.sp-link { font-size: 12.5px; font-weight: 600; color: var(--gold); }
+.sp-link.is-quiet { color: var(--paper-2); }
+.sp-link:hover { text-decoration: underline; }
 .sp-chip {
   height: 38px; padding: 0 14px; border-radius: 11px;
   background: var(--ink-2); color: var(--paper-2); font-size: 14px; font-weight: 500;
   transition: background-color .18s ease, color .18s ease;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 .sp-chip:hover { color: var(--paper); }
 .sp-chip.is-on { background: var(--gold); color: #17202B; font-weight: 600; }
@@ -349,46 +393,114 @@ function CapsInput({ value, onChange, ...rest }) {
 /*  Setup                                                              */
 /* ------------------------------------------------------------------ */
 
-function Setup({ initialPlayers, onStart }) {
-  const [preset, setPreset] = useState("flip7");
+function Setup({ initialPlayers, customGames, hiddenPresets, onDeletePreset, onDeleteCustom, onRestorePresets, onStart }) {
+  const visiblePresets = PRESETS.filter((p) => p.key !== "custom" && hiddenPresets.indexOf(p.key) === -1);
+  const somethingElse = PRESETS[PRESETS.length - 1];
+  const first = visiblePresets[0];
+
+  const [preset, setPreset] = useState(first ? first.key : null);
+  const [editing, setEditing] = useState(false);
+  const pressTimer = useRef(null);
+
   const [draft, setDraft] = useState({
-    name: "Flip 7",
+    name: first ? first.name : "",
     players: initialPlayers && initialPlayers.length ? initialPlayers : ["", ""],
-    endMode: "target",
-    target: 200,
-    maxRounds: 10,
-    lowWins: false,
+    endMode: first ? first.endMode : "open",
+    target: first ? first.target : 100,
+    maxRounds: first ? first.maxRounds : 10,
+    lowWins: first ? first.lowWins : false,
+    bidding: false,
   });
 
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
 
+  // Built-in chips carry their settings. Saved names carry only the name -
+  // whatever is set below stays where you left it.
   const applyPreset = (p) => {
     setPreset(p.key);
     set({ name: p.name, endMode: p.endMode, target: p.target, maxRounds: p.maxRounds, lowWins: p.lowWins });
   };
+  const applySaved = (nm) => {
+    setPreset("saved:" + nm);
+    set({ name: nm });
+  };
+
+  const chips = [
+    ...visiblePresets.map((p) => ({ key: p.key, label: p.label, deletable: true, pick: () => applyPreset(p), del: () => onDeletePreset(p.key) })),
+    ...customGames.map((nm) => ({ key: "saved:" + nm, label: nm, deletable: true, pick: () => applySaved(nm), del: () => onDeleteCustom(nm) })),
+    { key: "custom", label: "Something else", deletable: false, pick: () => applyPreset(somethingElse) },
+  ];
+
+  const startPress = () => {
+    clearTimeout(pressTimer.current);
+    pressTimer.current = setTimeout(() => setEditing(true), 550);
+  };
+  const endPress = () => clearTimeout(pressTimer.current);
+
+  // Keep the highlight honest when the name is typed by hand.
+  const onNameTyped = (v) => {
+    const hit = chips.find((c) => c.label.toLowerCase() === v.trim().toLowerCase());
+    setPreset(hit ? hit.key : null);
+    set({ name: v });
+  };
 
   return (
     <div className="sp-wrap">
-      <p className="sp-eyebrow">New game</p>
-      <h1 className="sp-title">Set up the pad</h1>
+      <h1 className="sp-title">New game - setup</h1>
 
       <div className="sp-field">
-        <p className="sp-eyebrow">What are you playing?</p>
-        <div className="sp-chips">
-          {PRESETS.map((p) => (
-            <button key={p.key} className={"sp-chip" + (preset === p.key ? " is-on" : "")} onClick={() => applyPreset(p)}>
-              {p.label}
-            </button>
+        <div className="sp-chips-head">
+          <p className="sp-eyebrow">What are you playing?</p>
+          {editing ? (
+            <button className="sp-link" onClick={() => setEditing(false)}>Done</button>
+          ) : (
+            customGames.length + hiddenPresets.length > 0 && (
+              <button className="sp-link is-quiet" onClick={() => setEditing(true)}>Edit</button>
+            )
+          )}
+        </div>
+
+        <div className={"sp-chips" + (editing ? " is-editing" : "")}>
+          {chips.map((c) => (
+            <div className="sp-chip-wrap" key={c.key}>
+              <button
+                className={"sp-chip" + (preset === c.key ? " is-on" : "")}
+                onClick={() => { if (!editing) c.pick(); }}
+                onPointerDown={startPress}
+                onPointerUp={endPress}
+                onPointerLeave={endPress}
+                onPointerCancel={endPress}
+                onContextMenu={(e) => e.preventDefault()}
+              >
+                {c.label}
+              </button>
+              {editing && c.deletable && (
+                <button className="sp-chip-x" aria-label={"Remove " + c.label} onClick={() => c.del()}>
+                  ×
+                </button>
+              )}
+            </div>
           ))}
         </div>
+
+        {editing && hiddenPresets.length > 0 && (
+          <button className="sp-link" style={{ marginTop: 12 }} onClick={onRestorePresets}>
+            Restore the built-in games
+          </button>
+        )}
+
         <input
           className="sp-input"
           style={{ marginTop: 10 }}
           value={draft.name}
           placeholder="Name this game"
-          onChange={(e) => set({ name: e.target.value })}
+          onChange={(e) => onNameTyped(e.target.value)}
         />
-        <p className="sp-hint">Presets just fill in a starting target — change anything below.</p>
+        <p className="sp-hint">
+          {editing
+            ? "Tap × to remove a game from the list. This doesn't touch any scores."
+            : "New names are added to the list when you start. Long-press a game to remove it."}
+        </p>
       </div>
 
       <div className="sp-field">
@@ -459,6 +571,22 @@ function Setup({ initialPlayers, onStart }) {
         </div>
       </div>
 
+      <div className="sp-field">
+        <p className="sp-eyebrow">Bidding</p>
+        <div className="sp-seg">
+          <button className={!draft.bidding ? "is-on" : ""} onClick={() => set({ bidding: false })}>
+            Off
+          </button>
+          <button className={draft.bidding ? "is-on" : ""} onClick={() => set({ bidding: true })}>
+            On
+          </button>
+        </div>
+        <p className="sp-hint">
+          Collects a bid from every player before the round is played, then the scores after.
+          Bids sit next to the score on the pad — they aren't scored for you.
+        </p>
+      </div>
+
       <div style={{ marginTop: 30 }}>
         <button className="sp-primary" onClick={() => onStart(newGameFrom(draft))}>
           Start scoring
@@ -472,7 +600,7 @@ function Setup({ initialPlayers, onStart }) {
 /*  Keypad                                                             */
 /* ------------------------------------------------------------------ */
 
-function Keypad({ player, playerIndex, playerCount, roundLabel, isCorrection, isLast, value, onKey, onGo, onClose }) {
+function Keypad({ player, playerIndex, playerCount, roundLabel, isCorrection, isLast, value, field, showSwitch, onField, onKey, onGo, onClose }) {
   const goLabel = isCorrection ? "SAVE" : isLast ? "DONE" : "NEXT";
 
   return (
@@ -482,7 +610,8 @@ function Keypad({ player, playerIndex, playerCount, roundLabel, isCorrection, is
           <div className="sp-kp-who">
             <b>{player.name}</b>
             <span>
-              {roundLabel} · {playerIndex + 1} of {playerCount}
+              {roundLabel}
+              {field ? " · " + (field === "bid" ? "Bid" : "Score") : ""} · {playerIndex + 1} of {playerCount}
             </span>
           </div>
           <div className={"sp-kp-val" + (value === "" || value === "-" ? " is-empty" : "")}>
@@ -492,6 +621,17 @@ function Keypad({ player, playerIndex, playerCount, roundLabel, isCorrection, is
             ×
           </button>
         </div>
+
+        {showSwitch && (
+          <div className="sp-kp-seg">
+            <button className={field === "bid" ? "is-on" : ""} onClick={() => onField("bid")}>
+              Bid
+            </button>
+            <button className={field === "score" ? "is-on" : ""} onClick={() => onField("score")}>
+              Score
+            </button>
+          </div>
+        )}
 
         <div className="sp-keys">
           {[
@@ -572,10 +712,12 @@ export default function ScorePad() {
   const [ready, setReady] = useState(false);
   const [game, setGame] = useState(null);
   const [lastPlayers, setLastPlayers] = useState(null);
+  const [customGames, setCustomGames] = useState([]);
+  const [hiddenPresets, setHiddenPresets] = useState([]);
   const [confirmNew, setConfirmNew] = useState(false);
 
   // pending (uncommitted) bottom row: playerId -> string
-  const [pending, setPending] = useState({});
+  const [pending, setPending] = useState(emptyPending());
   // active cell: { roundIndex: number|null, playerIndex, buffer, pristine }
   const [live, setLive] = useState(null);
 
@@ -586,7 +728,9 @@ export default function ScorePad() {
     loadState().then((s) => {
       if (!alive) return;
       if (s && s.game) setGame(s.game);
-      if (s && s.pending) setPending(s.pending);
+      if (s && s.pending) setPending(normalizePending(s.pending));
+      if (s && s.customGames) setCustomGames(s.customGames);
+      if (s && s.hiddenPresets) setHiddenPresets(s.hiddenPresets);
       setReady(true);
     });
     return () => {
@@ -595,8 +739,8 @@ export default function ScorePad() {
   }, []);
 
   useEffect(() => {
-    if (ready) saveState({ game, pending });
-  }, [game, pending, ready]);
+    if (ready) saveState({ game, pending, customGames, hiddenPresets });
+  }, [game, pending, customGames, hiddenPresets, ready]);
 
   useLayoutEffect(() => {
     if (live && liveRowRef.current) {
@@ -620,20 +764,75 @@ export default function ScorePad() {
     return (
       <div className="sp">
         <style>{CSS}</style>
-        <Setup initialPlayers={lastPlayers} onStart={(g) => { setPending({}); setGame(g); }} />
+        <Setup
+          initialPlayers={lastPlayers}
+          customGames={customGames}
+          hiddenPresets={hiddenPresets}
+          onDeletePreset={(k) => setHiddenPresets((h) => (h.indexOf(k) === -1 ? [...h, k] : h))}
+          onDeleteCustom={(nm) => setCustomGames((c) => c.filter((x) => x !== nm))}
+          onRestorePresets={() => setHiddenPresets([])}
+          onStart={(g) => {
+            const nm = g.name.trim();
+            const builtIn = PRESETS.some(
+              (p) => p.key !== "custom" && hiddenPresets.indexOf(p.key) === -1 && p.name.toLowerCase() === nm.toLowerCase()
+            );
+            if (nm && !builtIn) {
+              setCustomGames((c) => [nm, ...c.filter((x) => x.toLowerCase() !== nm.toLowerCase())].slice(0, 40));
+            }
+            setPending(emptyPending());
+            setGame(g);
+          }}
+        />
       </div>
     );
   }
 
+  /* -------- bidding phase -------- */
+
+  // Bids are mandatory, so the open round collects every bid before it will
+  // take a single score.
+  const bidsIn = game.players.every((p) => pending.bids[p.id] != null);
+  const phase = game.bidding && !bidsIn ? "bids" : "scores";
+
+  const valueAt = (roundIndex, pid, field) => {
+    if (roundIndex == null) return field === "bid" ? pending.bids[pid] : pending.scores[pid];
+    const r = game.rounds[roundIndex];
+    return field === "bid" ? (r.bids || {})[pid] : r.scores[pid];
+  };
+
   /* -------- cell editing -------- */
 
-  const openCell = (roundIndex, playerIndex) => {
+  const openCell = (roundIndex, playerIndex, field) => {
     const pid = game.players[playerIndex].id;
-    const current =
-      roundIndex == null
-        ? pending[pid] != null ? String(pending[pid]) : ""
-        : String(game.rounds[roundIndex].scores[pid] || 0);
-    setLive({ roundIndex, playerIndex, buffer: current, pristine: true });
+    let f = field;
+    if (!f) f = roundIndex == null && phase === "bids" ? "bid" : "score";
+    if (!game.bidding) f = "score";
+    const cur = valueAt(roundIndex, pid, f);
+    setLive({
+      roundIndex,
+      playerIndex,
+      field: f,
+      buffer: cur != null ? String(cur) : roundIndex == null ? "" : "0",
+      pristine: true,
+      staged: {},
+    });
+  };
+
+  // Switching bid/score banks whatever is on screen so nothing is lost.
+  const switchField = (f) => {
+    setLive((l) => {
+      if (!l || l.field === f) return l;
+      const staged = { ...l.staged, [l.field]: toInt(l.buffer) };
+      const pid = game.players[l.playerIndex].id;
+      const cur = staged[f] != null ? staged[f] : valueAt(l.roundIndex, pid, f);
+      return {
+        ...l,
+        field: f,
+        staged,
+        buffer: cur != null ? String(cur) : l.roundIndex == null ? "" : "0",
+        pristine: true,
+      };
+    });
   };
 
   const onKey = (k) => {
@@ -655,53 +854,77 @@ export default function ScorePad() {
     });
   };
 
-  const commitRound = (scores) => {
-    setGame((g) => ({ ...g, rounds: [...g.rounds, { id: uid(), scores }] }));
-    setPending({});
-    setLive(null);
-  };
-
   const onGo = () => {
     if (!live) return;
     const pid = game.players[live.playerIndex].id;
-    const val = toInt(live.buffer);
+    const staged = { ...live.staged, [live.field]: toInt(live.buffer) };
 
-    // correcting a committed round: save this one cell and get out
+    // Correcting a committed round: write whatever was touched, then get out.
     if (live.roundIndex != null) {
       setGame((g) => ({
         ...g,
-        rounds: g.rounds.map((r, i) => (i === live.roundIndex ? { ...r, scores: { ...r.scores, [pid]: val } } : r)),
+        rounds: g.rounds.map((r, i) => {
+          if (i !== live.roundIndex) return r;
+          const next = { ...r, scores: { ...r.scores }, bids: { ...(r.bids || {}) } };
+          if (staged.score != null) next.scores[pid] = staged.score;
+          if (staged.bid != null) next.bids[pid] = staged.bid;
+          return next;
+        }),
       }));
       setLive(null);
       return;
     }
 
-    const nextPending = { ...pending, [pid]: val };
+    const nextPending = { bids: { ...pending.bids }, scores: { ...pending.scores } };
+    if (staged.bid != null) nextPending.bids[pid] = staged.bid;
+    if (staged.score != null) nextPending.scores[pid] = staged.score;
+
     const isLast = live.playerIndex === game.players.length - 1;
 
     if (isLast) {
+      // Finishing the bid pass just banks the bids - the round still has to be played.
+      if (live.field === "bid") {
+        setPending(nextPending);
+        setLive(null);
+        return;
+      }
       const scores = {};
-      game.players.forEach((p) => (scores[p.id] = toInt(nextPending[p.id])));
-      commitRound(scores);
+      const bids = {};
+      game.players.forEach((p) => {
+        scores[p.id] = toInt(nextPending.scores[p.id]);
+        if (game.bidding) bids[p.id] = toInt(nextPending.bids[p.id]);
+      });
+      const round = { id: uid(), scores };
+      if (game.bidding) round.bids = bids;
+      setGame((g) => ({ ...g, rounds: [...g.rounds, round] }));
+      setPending(emptyPending());
+      setLive(null);
       return;
     }
 
     setPending(nextPending);
     const ni = live.playerIndex + 1;
     const nid = game.players[ni].id;
+    const nv = live.field === "bid" ? nextPending.bids[nid] : nextPending.scores[nid];
     setLive({
       roundIndex: null,
       playerIndex: ni,
-      buffer: nextPending[nid] != null ? String(nextPending[nid]) : "",
+      field: live.field,
+      buffer: nv != null ? String(nv) : "",
       pristine: true,
+      staged: {},
     });
   };
 
   const closeKeypad = () => {
-    // keep whatever was typed into the pending row
     if (live && live.roundIndex == null) {
       const pid = game.players[live.playerIndex].id;
-      if (live.buffer !== "") setPending({ ...pending, [pid]: toInt(live.buffer) });
+      const staged = { ...live.staged };
+      if (live.buffer !== "") staged[live.field] = toInt(live.buffer);
+      const next = { bids: { ...pending.bids }, scores: { ...pending.scores } };
+      if (staged.bid != null) next.bids[pid] = staged.bid;
+      if (staged.score != null) next.scores[pid] = staged.score;
+      setPending(next);
     }
     setLive(null);
   };
@@ -714,17 +937,17 @@ export default function ScorePad() {
     setGame({ ...game, rounds: game.rounds.slice(0, -1) });
   };
 
-  const clearPending = () => setPending({});
+  const clearPending = () => setPending(emptyPending());
 
   const rematch = () => {
-    setPending({});
+    setPending(emptyPending());
     setLive(null);
     setGame({ ...game, id: uid(), rounds: [], dismissedAt: -1 });
   };
 
   const clearGame = () => {
     setLastPlayers(game.players.map((p) => p.name));
-    setPending({});
+    setPending(emptyPending());
     setLive(null);
     setGame(null);
   };
@@ -739,7 +962,7 @@ export default function ScorePad() {
   const n = game.players.length;
   const showResult = ended && game.dismissedAt !== game.rounds.length;
   const nextRoundNo = game.rounds.length + 1;
-  const hasPending = Object.keys(pending).length > 0;
+  const hasPending = Object.keys(pending.bids).length + Object.keys(pending.scores).length > 0;
 
   const headSize = n >= 7 ? 9.5 : n >= 5 ? 11 : 12.5;
   const cellSize = n >= 7 ? 13 : n >= 5 ? 15 : 16;
@@ -801,16 +1024,22 @@ export default function ScorePad() {
               return (
                 <tr key={r.id} ref={isLiveRow ? liveRowRef : null}>
                   <td className="sp-rd">{ri + 1}</td>
-                  {game.players.map((p, pi) => (
-                    <td
-                      key={p.id}
-                      className={"sp-cell" + (isLiveRow && live.playerIndex === pi ? " is-live" : "")}
-                      style={{ fontSize: cellSize }}
-                      onClick={() => openCell(ri, pi)}
-                    >
-                      {isLiveRow && live.playerIndex === pi ? live.buffer || "0" : r.scores[p.id] || 0}
-                    </td>
-                  ))}
+                  {game.players.map((p, pi) => {
+                    const isLiveCell = isLiveRow && live.playerIndex === pi;
+                    const bid = (r.bids || {})[p.id];
+                    const showBid = game.bidding && bid != null && !(isLiveCell && live.field === "bid");
+                    return (
+                      <td
+                        key={p.id}
+                        className={"sp-cell" + (isLiveCell ? " is-live" : "")}
+                        style={{ fontSize: cellSize }}
+                        onClick={() => openCell(ri, pi)}
+                      >
+                        {showBid && <span className="sp-bid">{bid}</span>}
+                        {isLiveCell ? live.buffer || "0" : r.scores[p.id] || 0}
+                      </td>
+                    );
+                  })}
                 </tr>
               );
             })}
@@ -820,18 +1049,34 @@ export default function ScorePad() {
               <td className="sp-rd">{nextRoundNo}</td>
               {game.players.map((p, pi) => {
                 const isLiveCell = live && live.roundIndex == null && live.playerIndex === pi;
-                const val = pending[p.id];
-                const text = isLiveCell ? live.buffer || "0" : val != null ? String(val) : "–";
+                const bid = pending.bids[p.id];
+                const score = pending.scores[p.id];
+
+                // Whatever is being typed is always the big number; the bid
+                // drops to the corner once the round moves on to scores.
+                let text, showBid, filled;
+                if (isLiveCell) {
+                  text = live.buffer || "0";
+                  showBid = game.bidding && live.field === "score" && bid != null;
+                  filled = true;
+                } else if (game.bidding && phase === "bids") {
+                  text = bid != null ? String(bid) : "–";
+                  showBid = false;
+                  filled = bid != null;
+                } else {
+                  text = score != null ? String(score) : "–";
+                  showBid = game.bidding && bid != null;
+                  filled = score != null;
+                }
+
                 return (
                   <td
                     key={p.id}
-                    className={
-                      "sp-cell" +
-                      (isLiveCell ? " is-live" : val != null ? " is-draft" : " is-blank")
-                    }
+                    className={"sp-cell" + (isLiveCell ? " is-live" : filled ? " is-draft" : " is-blank")}
                     style={{ fontSize: cellSize }}
                     onClick={() => openCell(null, pi)}
                   >
+                    {showBid && <span className="sp-bid">{bid}</span>}
                     {text}
                   </td>
                 );
@@ -853,13 +1098,19 @@ export default function ScorePad() {
 
         {game.rounds.length === 0 && !live && (
           <p className="sp-note">
-            Tap a cell in round 1 to start scoring.
+            Tap {game.bidding ? "Enter Bids" : "Enter Scores"}, or any cell in round 1, to start.
             <br />
             DONE on the last player writes the round in.
           </p>
         )}
 
-        <div className="sp-actions">
+        <div style={{ marginTop: 22 }}>
+          <button className="sp-primary" onClick={() => openCell(null, 0)}>
+            {phase === "bids" ? "Enter Bids" : "Enter Scores"}
+          </button>
+        </div>
+
+        <div className="sp-actions" style={{ marginTop: 10 }}>
           <button className="sp-ghost" onClick={undoLast} disabled={!game.rounds.length}>
             Undo last round
           </button>
@@ -878,6 +1129,9 @@ export default function ScorePad() {
           isCorrection={live.roundIndex != null}
           isLast={live.playerIndex === n - 1}
           value={live.buffer}
+          field={game.bidding ? live.field : null}
+          showSwitch={game.bidding && (live.roundIndex != null || phase === "scores")}
+          onField={switchField}
           onKey={onKey}
           onGo={onGo}
           onClose={closeKeypad}

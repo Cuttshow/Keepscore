@@ -3,7 +3,7 @@
    Bump CACHE whenever you change app.js or index.html, otherwise phones
    that already have the old version cached will keep serving it. */
 
-const CACHE = "keepscore-v2";
+const CACHE = "keepscore-v6";
 
 const ASSETS = [
   "./",
